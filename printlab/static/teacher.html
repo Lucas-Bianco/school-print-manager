@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Print Lab · Teachers</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="wrap">
+  <nav class="top"><h1>Teachers</h1>
+    <div class="small"><a href="/">Upload</a><a href="/board">Board</a><a href="/admin">Admin</a>
+      <a href="#" id="logout" class="hidden">Log out</a></div></nav>
+
+  <div class="card" id="loginCard">
+    <h2>Log in</h2>
+    <form id="login" class="row">
+      <div><label for="pin">Teacher PIN</label><input id="pin" type="password" inputmode="numeric" autocomplete="off"></div>
+      <div style="flex:0 0 auto"><button class="primary">Log in</button></div>
+    </form>
+    <div class="msg" id="loginMsg"></div>
+  </div>
+
+  <div id="main" class="hidden">
+    <div class="card"><h2>Waiting for approval</h2><div id="pending"></div></div>
+    <div class="card"><h2>Queue</h2><p class="small muted">Use the arrows to change the order. Jobs run top to bottom on the first free printer that fits.</p><div id="queue"></div></div>
+    <div class="card"><h2>Printers</h2><div id="printers"></div></div>
+    <div class="card"><h2>Recent jobs</h2><div id="history"></div></div>
+  </div>
+</div>
+<script src="/static/common.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+let st = null;
+
+async function check() {
+  const me = await PL.api("/api/me");
+  const ok = me.role === "teacher" || me.role === "admin";
+  $("loginCard").classList.toggle("hidden", ok);
+  $("main").classList.toggle("hidden", !ok);
+  $("logout").classList.toggle("hidden", !ok);
+  if (ok) refresh();
+}
+
+$("login").addEventListener("submit", async e => {
+  e.preventDefault();
+  try { await PL.api("/api/login", { method: "POST", json: { pin: $("pin").value } }); $("pin").value = ""; check(); }
+  catch (err) { PL.show($("loginMsg"), err.message, "err"); }
+});
+$("logout").addEventListener("click", async e => { e.preventDefault(); await PL.api("/api/logout", { method: "POST" }); check(); });
+
+function jobRow(j, buttons) {
+  return `<tr><td>${j.has_thumbnail ? `<img class="thumb" src="/api/jobs/${j.id}/thumbnail" alt="">` : ""}</td>
+    <td><b>${PL.esc(j.name)}</b><div class="small muted">${PL.esc(j.title)}</div></td>
+    <td>${j.est}${j.filament_g ? `<div class="small muted">${j.filament_g} g</div>` : ""}</td>
+    <td class="small">${PL.esc(j.printer_model || "")}</td><td class="small">${PL.day(j.created_at)}</td>
+    <td><div class="actions">${buttons}</div></td></tr>`;
+}
+
+async function refresh() {
+  try {
+    st = await PL.api("/api/state");
+  } catch (err) { return; }
+  $("pending").innerHTML = st.pending.length ? `<table>` + st.pending.map(j => jobRow(j,
+    `<button class="good" data-a="approve" data-id="${j.id}">Approve</button><button data-a="reject" data-id="${j.id}">Reject</button>`)).join("") + `</table>`
+    : `<p class="muted">Nothing waiting.</p>`;
+  $("queue").innerHTML = st.queue.length ? `<table>` + st.queue.map((j, i) => jobRow(j,
+    `<button data-a="up" data-i="${i}" ${i ? "" : "disabled"}>↑</button><button data-a="down" data-i="${i}" ${i < st.queue.length - 1 ? "" : "disabled"}>↓</button>
+     <button data-a="cancel" data-id="${j.id}">Remove</button>`)).join("") + `</table>` : `<p class="muted">Queue is empty.</p>`;
+  $("printers").innerHTML = `<table>` + st.printers.map(p => {
+    const j = p.current_job, b = [];
+    if (p.state === "needs_clear") b.push(`<button class="good" data-a="clear" data-p="${p.id}">Bed cleared</button>`);
+    if (p.state === "printing") b.push(`<button data-a="pause" data-p="${p.id}">Pause</button>`);
+    if (p.state === "paused" || p.state === "attention") b.push(`<button data-a="resume" data-p="${p.id}">Resume</button>`);
+    if (j) b.push(`<button class="bad" data-a="stop" data-p="${p.id}">Stop</button>`);
+    return `<tr><td><b>${PL.esc(p.name)}</b><div class="small muted">${PL.esc(p.kind)} ${PL.esc(p.models)}</div></td>
+      <td>${PL.badge(p.state)}</td><td>${j ? `${PL.esc(j.name)} · ${Math.round(p.progress || 0)}% · ${PL.dur(p.remaining_s)} left` : ""}
+      ${p.last_error ? `<div class="small" style="color:var(--bad)">${PL.esc(p.last_error)}</div>` : ""}</td>
+      <td><div class="actions">${b.join("")}</div></td></tr>`;
+  }).join("") + `</table>`;
+  const hist = await PL.api("/api/history?limit=40");
+  $("history").innerHTML = `<table><tr><th>#</th><th>Student</th><th>File</th><th>Status</th><th>Time</th><th>Sent</th><th></th></tr>` +
+    hist.map(j => `<tr><td class="small">${j.id}</td><td>${PL.esc(j.student_name)}<div class="small muted">${PL.esc(j.class_code)}</div></td>
+      <td>${PL.esc(j.title)}</td><td>${PL.badge(j.status)}<div class="small muted">${PL.esc(j.fail_reason || j.reject_reason || (j.approved_by ? "by " + j.approved_by : ""))}</div></td>
+      <td>${j.est}</td><td class="small">${PL.day(j.created_at)}</td>
+      <td>${["failed", "cancelled"].includes(j.status) ? `<button data-a="requeue" data-id="${j.id}">Re-queue</button>` : ""}</td></tr>`).join("") + `</table>`;
+}
+
+document.addEventListener("click", async e => {
+  const b = e.target.closest("button[data-a]");
+  if (!b) return;
+  const { a, id, p, i } = b.dataset;
+  try {
+    if (a === "approve") await PL.api(`/api/jobs/${id}/approve`, { method: "POST" });
+    if (a === "reject") {
+      const reason = prompt("Reason for rejecting (the student will see this):", "Too long for class time");
+      if (reason === null) return;
+      await PL.api(`/api/jobs/${id}/reject`, { method: "POST", json: { reason } });
+    }
+    if (a === "cancel") { if (!confirm("Remove this job from the queue?")) return; await PL.api(`/api/jobs/${id}/cancel`, { method: "POST" }); }
+    if (a === "requeue") await PL.api(`/api/jobs/${id}/requeue`, { method: "POST" });
+    if (a === "up" || a === "down") {
+      const ids = st.queue.map(j => j.id), k = +i, other = a === "up" ? k - 1 : k + 1;
+      [ids[k], ids[other]] = [ids[other], ids[k]];
+      await PL.api("/api/queue/reorder", { method: "POST", json: { ids: [...ids, ...st.pending.map(j => j.id)] } });
+    }
+    if (a === "clear") await PL.api(`/api/printers/${p}/bed-cleared`, { method: "POST" });
+    if (a === "pause" || a === "resume") await PL.api(`/api/printers/${p}/${a}`, { method: "POST" });
+    if (a === "stop") { if (!confirm("Stop this print? The job is cancelled.")) return; await PL.api(`/api/printers/${p}/stop`, { method: "POST" }); }
+    refresh();
+  } catch (err) { if (err.status === 401) check(); else alert(err.message); }
+});
+setInterval(() => { if (!$("main").classList.contains("hidden")) refresh(); }, 8000);
+check();
+</script>
+</body>
+</html>

@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Print Lab</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="wrap">
+  <nav class="top">
+    <h1 id="lab">Print Lab</h1>
+    <div class="small"><a href="/board">Queue board</a><a href="/teacher">Teachers</a></div>
+  </nav>
+
+  <div class="card">
+    <h2>Send a print</h2>
+    <p class="muted small" id="rules"></p>
+    <form id="up">
+      <div class="row">
+        <div><label for="name">Your first and last name</label><input id="name" name="name" required autocomplete="name"></div>
+        <div><label for="code">Class code</label><input id="code" name="class_code" autocomplete="off"></div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <div><label for="printer">Printer</label>
+          <select id="printer" name="printer_id"><option value="">Any printer that fits my file</option></select></div>
+        <div><label for="file">Sliced file (.bgcode, .gcode or Bambu .gcode.3mf)</label>
+          <input id="file" name="file" type="file" accept=".bgcode,.gcode,.3mf" required></div>
+      </div>
+      <div style="margin-top:16px"><button class="primary" id="send" type="submit">Send to queue</button></div>
+      <div class="msg" id="upmsg"></div>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>My prints</h2>
+    <div class="row"><div><label for="me">Your name</label><input id="me" placeholder="Same name you uploaded with"></div>
+      <div style="flex:0 0 auto"><button id="look">Show</button></div></div>
+    <div id="mine" style="margin-top:12px"></div>
+  </div>
+</div>
+<script src="/static/common.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+let saved = {};
+try { saved = JSON.parse(localStorage.getItem("printlab-me") || "{}"); } catch (_) {}
+if (saved.name) { $("name").value = saved.name; $("me").value = saved.name; }
+if (saved.code) $("code").value = saved.code;
+
+async function init() {
+  const st = await PL.api("/api/state");
+  $("lab").textContent = st.lab_name;
+  document.title = st.lab_name;
+  const [hh, mm] = st.rules.auto_approve_after.split(":");
+  const t = new Date(); t.setHours(+hh, +mm);
+  $("rules").textContent = `Prints of ${st.rules.short_print_minutes} min or less, and anything sent after ` +
+    `${t.toLocaleTimeString([], {hour: "numeric", minute: "2-digit"})}, go straight into the queue. Longer prints wait for a teacher.`;
+  for (const p of await PL.api("/api/printers")) {
+    const o = document.createElement("option");
+    o.value = p.id; o.textContent = `${p.name}${p.models ? " (" + p.models + ")" : ""}`;
+    $("printer").appendChild(o);
+  }
+  if ($("me").value) loadMine();
+}
+
+$("up").addEventListener("submit", async e => {
+  e.preventDefault();
+  const fd = new FormData($("up"));
+  if (!fd.get("printer_id")) fd.delete("printer_id");
+  $("send").disabled = true;
+  PL.show($("upmsg"), "Uploading...", "wait");
+  try {
+    const job = await PL.api("/api/jobs", { method: "POST", body: fd });
+    try { localStorage.setItem("printlab-me", JSON.stringify({ name: fd.get("name"), code: fd.get("class_code") })); } catch (_) {}
+    const kind = job.status === "approved" ? "ok" : job.status === "rejected" ? "err" : "wait";
+    const head = job.status === "approved" ? "In the queue!" : job.status === "rejected" ? "Not accepted." : "Sent! Waiting for a teacher to approve.";
+    PL.show($("upmsg"), `${head} "${job.title}", about ${job.est}. ${job.decision_reason}.`, kind);
+    $("file").value = "";
+    $("me").value = fd.get("name");
+    loadMine();
+  } catch (err) {
+    PL.show($("upmsg"), err.message, "err");
+  } finally {
+    $("send").disabled = false;
+  }
+});
+
+async function loadMine() {
+  const name = $("me").value.trim();
+  if (!name) return;
+  const jobs = await PL.api("/api/jobs?name=" + encodeURIComponent(name));
+  if (!jobs.length) { $("mine").innerHTML = `<p class="muted">No prints found for that name.</p>`; return; }
+  $("mine").innerHTML = `<table><tr><th></th><th>File</th><th>Status</th><th>Time</th><th>Sent</th><th></th></tr>` +
+    jobs.map(j => {
+      let extra = "";
+      if (j.status === "approved" && j.est_start) extra = `<div class="small muted">Starts about ${PL.time(j.est_start)}</div>`;
+      if (j.status === "printing") extra = `<div class="bar" style="margin-top:4px"><i style="width:${j.progress || 0}%"></i></div>`;
+      if (j.status === "rejected") extra = `<div class="small muted">${PL.esc(j.reject_reason)}</div>`;
+      if (j.status === "failed") extra = `<div class="small muted">${PL.esc(j.fail_reason)}</div>`;
+      const btns = [];
+      if (["pending_approval", "approved"].includes(j.status)) btns.push(`<button data-act="cancel" data-id="${j.id}">Cancel</button>`);
+      if (["failed", "cancelled"].includes(j.status)) btns.push(`<button data-act="requeue" data-id="${j.id}">Print again</button>`);
+      if (j.status === "done") btns.push(`<button data-act="fail" data-id="${j.id}">It failed</button>`);
+      return `<tr><td>${j.has_thumbnail ? `<img class="thumb" src="/api/jobs/${j.id}/thumbnail" alt="">` : ""}</td>
+        <td>${PL.esc(j.title)}</td><td>${PL.badge(j.status)}${extra}</td><td>${j.est}</td>
+        <td class="small">${PL.day(j.created_at)}</td><td><div class="actions">${btns.join("")}</div></td></tr>`;
+    }).join("") + `</table>`;
+}
+
+$("look").addEventListener("click", loadMine);
+$("me").addEventListener("keydown", e => { if (e.key === "Enter") loadMine(); });
+$("mine").addEventListener("click", async e => {
+  const b = e.target.closest("button[data-act]");
+  if (!b) return;
+  const id = b.dataset.id, name = $("me").value.trim();
+  try {
+    if (b.dataset.act === "cancel") {
+      if (!confirm("Cancel this print?")) return;
+      await PL.api(`/api/jobs/${id}/cancel`, { method: "POST", json: { name } });
+    } else if (b.dataset.act === "requeue") {
+      await PL.api(`/api/jobs/${id}/requeue`, { method: "POST", json: { name } });
+    } else if (b.dataset.act === "fail") {
+      const reason = prompt("What went wrong? (e.g. spaghetti, not sticking, wrong size)");
+      if (!reason) return;
+      await PL.api(`/api/jobs/${id}/report-failure`, { method: "POST", json: { reason, by: name } });
+    }
+    loadMine();
+  } catch (err) { alert(err.message); }
+});
+setInterval(() => { if ($("me").value.trim()) loadMine(); }, 15000);
+init().catch(err => PL.show($("upmsg"), "Can't reach the print server: " + err.message, "err"));
+</script>
+</body>
+</html>

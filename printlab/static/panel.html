@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Print Lab Panel</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  /* Built for the 800x480 Raspberry Pi touch display. Every button is at least 48 px tall. */
+  html, body { height: 100%; overflow: hidden; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
+  body { font-size: 16px; }
+  .top { height: 56px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid var(--line); }
+  .top h1 { font-size: 20px; margin: 0; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .top button { min-height: 44px; padding: 0 14px; }
+  #clock { font-weight: 700; font-size: 18px; margin-right: 4px; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 8px; height: calc(100% - 56px); }
+  .tile { background: var(--card); border: 2px solid var(--line); border-radius: 12px; padding: 8px 10px;
+          display: flex; flex-direction: column; min-height: 0; }
+  .tile.needs_clear { border-color: var(--warn); }
+  .tile.attention, .tile.error { border-color: var(--bad); }
+  .tile h2 { font-size: 17px; margin: 0; display: flex; justify-content: space-between; align-items: center; gap: 4px; }
+  .tile h2 span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tile .badge { font-size: 12px; }
+  .tile .info { font-size: 14px; margin: 4px 0; flex: 1; min-height: 0; overflow: hidden; }
+  .tile .info b { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tile .bar { height: 8px; margin: 4px 0; }
+  .tile .btns { display: flex; gap: 6px; }
+  .tile .btns button { flex: 1; min-height: 48px; padding: 4px; font-size: 15px; }
+  .keypad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
+  .keypad button { min-height: 56px; font-size: 22px; }
+  .pin { font-size: 30px; letter-spacing: 10px; text-align: center; min-height: 44px; }
+  .choices { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+  .choices button { min-height: 56px; }
+  .ap { display: flex; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .ap .txt { flex: 1; min-width: 0; }
+  .ap .txt b { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ap button { min-height: 48px; }
+  .err { color: var(--bad); font-weight: 600; min-height: 1.3em; text-align: center; }
+  .modal .box h3 { display: flex; justify-content: space-between; align-items: center; }
+  .modal .box h3 button { min-height: 44px; }
+</style>
+</head>
+<body class="dark">
+<div class="top">
+  <h1 id="lab">Print Lab</h1>
+  <span id="clock"></span>
+  <button id="apBtn">Approvals</button>
+  <button id="teachBtn">Teacher</button>
+</div>
+<div class="grid" id="grid"></div>
+<div id="modal" class="modal hidden"><div class="box" id="box"></div></div>
+<script src="/static/common.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+let state = null, teacher = null, lockTimer = null;
+
+// ----------------------------------------------------------- teacher unlock
+function setTeacher(t) {
+  teacher = t;
+  PL.panelToken = t ? t.token : null;
+  clearTimeout(lockTimer);
+  if (t) lockTimer = setTimeout(() => setTeacher(null), t.ttl * 1000);
+  $("teachBtn").textContent = t ? `Lock (${t.name.slice(0, 14)})` : "Teacher";
+  $("teachBtn").className = t ? "good" : "";
+  render();
+}
+function touchTeacher() { if (teacher) setTeacher(teacher); }   // any teacher action restarts the 60 s timer
+
+function askPin(then) {
+  let pin = "";
+  openModal(`<h3>Teacher PIN <button data-close>Close</button></h3>
+    <div class="pin" id="pin"></div><div class="err" id="pinErr"></div>
+    <div class="keypad">${[1,2,3,4,5,6,7,8,9].map(n => `<button data-k="${n}">${n}</button>`).join("")}
+      <button data-k="del">⌫</button><button data-k="0">0</button><button data-k="ok" class="primary">OK</button></div>`);
+  $("box").onclick = async e => {
+    const k = e.target.dataset.k;
+    if (e.target.dataset.close !== undefined) return closeModal();
+    if (!k) return;
+    if (k === "del") pin = pin.slice(0, -1);
+    else if (k === "ok") {
+      try {
+        const t = await PL.api("/api/login", { method: "POST", json: { pin, mode: "panel" } });
+        setTeacher(t); closeModal(); if (then) then();
+      } catch (err) { $("pinErr").textContent = err.message; pin = ""; }
+    } else if (pin.length < 8) pin += k;
+    $("pin").textContent = "•".repeat(pin.length);
+  };
+}
+function needTeacher(fn) { teacher ? fn() : askPin(fn); }
+
+// ------------------------------------------------------------------ modals
+function openModal(html) { $("box").innerHTML = html; $("box").onclick = null; $("modal").classList.remove("hidden"); }
+function closeModal() { $("modal").classList.add("hidden"); $("box").innerHTML = ""; }
+$("modal").addEventListener("click", e => { if (e.target.id === "modal") closeModal(); });
+
+function reportFailure(job) {
+  openModal(`<h3>What went wrong? <button data-close>Back</button></h3>
+    <div class="muted">${PL.esc(job.name)} · ${PL.esc(job.title)}</div>
+    <div class="choices">${state.fail_reasons.map(r => `<button data-r="${PL.esc(r)}">${PL.esc(r)}</button>`).join("")}</div>`);
+  $("box").onclick = async e => {
+    if (e.target.dataset.close !== undefined) return closeModal();
+    const reason = e.target.dataset.r;
+    if (!reason) return;
+    try { await PL.api(`/api/jobs/${job.id}/report-failure`, { method: "POST", json: { reason, by: "touch panel" } }); }
+    catch (err) { alert(err.message); }
+    closeModal(); refresh();
+  };
+}
+
+function confirmBox(text, yesLabel, fn) {
+  openModal(`<h3>${PL.esc(text)}</h3><div class="choices"><button data-no>No</button><button class="bad" data-yes>${PL.esc(yesLabel)}</button></div>`);
+  $("box").onclick = async e => {
+    if (e.target.dataset.no !== undefined) return closeModal();
+    if (e.target.dataset.yes !== undefined) { closeModal(); await fn(); refresh(); }
+  };
+}
+
+function showApprovals() {
+  const list = state.pending;
+  openModal(`<h3>Waiting for approval (${list.length}) <button data-close>Close</button></h3>` + (list.length ? list.map(j => `
+    <div class="ap">${j.has_thumbnail ? `<img class="thumb" src="/api/jobs/${j.id}/thumbnail" alt="">` : ""}
+      <div class="txt"><b>${PL.esc(j.name)}</b><span class="small muted">${PL.esc(j.title)} · ${j.est}${j.filament_g ? " · " + j.filament_g + " g" : ""}</span></div>
+      <button class="good" data-ok="${j.id}">Approve</button><button data-no="${j.id}">Reject</button></div>`).join("")
+    : `<p class="muted">Nothing to approve.</p>`));
+  $("box").onclick = async e => {
+    const d = e.target.dataset;
+    if (d.close !== undefined) return closeModal();
+    try {
+      if (d.ok) { touchTeacher(); await PL.api(`/api/jobs/${d.ok}/approve`, { method: "POST" }); }
+      else if (d.no) {
+        const id = d.no;
+        openModal(`<h3>Reason for rejecting</h3><div class="choices">${["Too long", "Not for class", "File problem", "Too much filament"]
+          .map(r => `<button data-rr="${r}">${r}</button>`).join("")}</div>`);
+        $("box").onclick = async ev => {
+          const rr = ev.target.dataset.rr;
+          if (!rr) return;
+          touchTeacher();
+          try { await PL.api(`/api/jobs/${id}/reject`, { method: "POST", json: { reason: rr } }); } catch (err) { alert(err.message); }
+          await refresh(); showApprovals();
+        };
+        return;
+      } else return;
+      await refresh(); showApprovals();
+    } catch (err) { if (err.status === 401) { setTeacher(null); askPin(showApprovals); } else alert(err.message); }
+  };
+}
+
+// --------------------------------------------------------------- tiles
+function tile(p) {
+  const j = p.current_job, last = p.last_job, btn = [];
+  let info = "";
+  if (["printing", "paused", "attention"].includes(p.state)) {
+    info = `<b>${PL.esc(j ? j.name : "")}</b><span class="muted">${PL.esc(j ? j.title : "")}</span>
+      <div class="bar"><i style="width:${p.progress || 0}%"></i></div>${Math.round(p.progress || 0)}% · ${PL.dur(p.remaining_s)} left`;
+    if (p.state === "printing") btn.push(`<button data-a="pause" data-p="${p.id}">Pause</button>`);
+    else btn.push(`<button class="good" data-a="resume" data-p="${p.id}">Resume</button>`);
+    if (j) btn.push(`<button class="bad" data-a="fail" data-p="${p.id}">Failed</button>`);
+    if (teacher) btn.push(`<button data-a="stop" data-p="${p.id}">Stop</button>`);
+  } else if (p.state === "needs_clear") {
+    info = last ? `<b>${last.status === "failed" ? "Failed" : "Done"}: ${PL.esc(last.name)}</b><span class="muted">${PL.esc(last.title)}</span>`
+                : `<b>Check the bed is empty</b>`;
+    btn.push(`<button class="good" data-a="clear" data-p="${p.id}">Bed cleared</button>`);
+    if (last && last.status === "done") btn.push(`<button class="bad" data-a="faillast" data-p="${p.id}">Failed</button>`);
+  } else if (p.state === "maintenance") {
+    info = `<span class="muted">${PL.esc(p.maintenance_note || "Out of service")}</span>`;
+  } else if (p.state === "offline") {
+    info = `<span class="muted">Not connected${p.message ? ": " + PL.esc(p.message) : ""}</span>`;
+  } else {
+    info = `<span class="muted">Ready for the next job</span>`;
+  }
+  if (p.last_error && p.state !== "offline") info += `<div class="small" style="color:var(--bad)">${PL.esc(p.last_error).slice(0, 90)}</div>`;
+  return `<div class="tile ${p.state}"><h2><span>${PL.esc(p.name)}</span>${PL.badge(p.state)}</h2>
+    <div class="info">${info}</div><div class="btns">${btn.join("")}</div></div>`;
+}
+
+function render() {
+  if (!state) return;
+  $("lab").textContent = state.lab_name;
+  $("apBtn").textContent = `Approvals (${state.pending.length})`;
+  $("apBtn").className = state.pending.length ? "primary" : "";
+  $("grid").innerHTML = state.printers.map(tile).join("") || `<p class="muted">No printers yet. Add them at /admin from a computer.</p>`;
+}
+
+$("grid").addEventListener("click", async e => {
+  const b = e.target.closest("button[data-a]");
+  if (!b) return;
+  const p = state.printers.find(x => x.id == b.dataset.p);
+  const a = b.dataset.a;
+  try {
+    if (a === "clear") {
+      confirmBox("Is the bed empty and clean?", "Yes, start next", () => PL.api(`/api/printers/${p.id}/bed-cleared`, { method: "POST" }));
+      return;
+    }
+    if (a === "pause") await PL.api(`/api/printers/${p.id}/pause`, { method: "POST" });
+    if (a === "resume") return needTeacher(async () => { touchTeacher(); await PL.api(`/api/printers/${p.id}/resume`, { method: "POST" }); refresh(); });
+    if (a === "stop") return confirmBox(`Stop the print on ${p.name}?`, "Stop print", async () => {
+      touchTeacher(); await PL.api(`/api/printers/${p.id}/stop`, { method: "POST" }); });
+    if (a === "fail") return reportFailure(p.current_job);
+    if (a === "faillast") return reportFailure(p.last_job);
+    refresh();
+  } catch (err) { alert(err.message); }
+});
+$("apBtn").addEventListener("click", () => needTeacher(showApprovals));
+$("teachBtn").addEventListener("click", async () => {
+  if (teacher) { try { await PL.api("/api/logout", { method: "POST" }); } catch (_) {} setTeacher(null); }
+  else askPin();
+});
+
+async function refresh() {
+  try { state = await PL.api("/api/state"); render(); } catch (_) { /* keep last view */ }
+}
+function tick() { $("clock").textContent = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); }
+tick(); refresh();
+setInterval(tick, 10000);
+setInterval(() => { if ($("modal").classList.contains("hidden")) refresh(); }, 3000);
+</script>
+</body>
+</html>

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Print Queue</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  /* Sized for a 1080p TV read from across the room. Scales with the screen width. */
+  html { font-size: clamp(14px, 1.15vw, 28px); }
+  body { overflow: hidden; height: 100vh; }
+  .board { display: grid; grid-template-rows: auto auto 1fr; gap: 1.2rem; padding: 1.4rem 1.8rem; height: 100vh; }
+  header { display: flex; justify-content: space-between; align-items: baseline; }
+  header h1 { font-size: 2.4rem; margin: 0; }
+  #clock { font-size: 2.2rem; font-weight: 700; }
+  .printers { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 1rem; }
+  .pr { background: var(--card); border: 2px solid var(--line); border-radius: 1rem; padding: 1rem 1.1rem; }
+  .pr h2 { font-size: 1.5rem; margin: 0 0 .4rem; display: flex; justify-content: space-between; gap: .5rem; align-items: center; }
+  .pr .who { font-size: 1.3rem; font-weight: 600; margin-top: .5rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pr .what { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pr .what.wrapline { white-space: normal; }
+  .pr .bar { height: .8rem; margin: .7rem 0 .3rem; }
+  .pr.needs_clear { border-color: var(--warn); }
+  .pr.attention, .pr.error { border-color: var(--bad); }
+  .pr .badge { font-size: .95rem; }
+  .bottom { display: grid; grid-template-columns: 2fr 1fr; gap: 1.2rem; min-height: 0; }
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 1rem; padding: 1rem 1.2rem; overflow: hidden; }
+  .panel h3 { font-size: 1.4rem; }
+  table td, table th { font-size: 1.15rem; padding: .45rem .4rem; }
+  .num { color: var(--muted); width: 2.2rem; }
+  .banner { font-size: 1.25rem; font-weight: 600; padding: .8rem 1rem; border-radius: .8rem; margin-bottom: .8rem;
+            background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+  .failed li { margin-bottom: .4rem; font-size: 1.1rem; }
+  .stale { position: fixed; bottom: .6rem; right: 1rem; color: var(--bad); font-weight: 700; }
+</style>
+</head>
+<body class="dark">
+<div class="board">
+  <header><h1 id="lab">Print Lab</h1><div id="clock"></div></header>
+  <section class="printers" id="printers"></section>
+  <section class="bottom">
+    <div class="panel"><h3>Up next</h3><div id="queue"></div></div>
+    <div class="panel">
+      <div id="pending"></div>
+      <h3>Failed today</h3><ul class="failed" id="failed" style="padding-left:1.2rem;margin:0"></ul>
+    </div>
+  </section>
+</div>
+<div class="stale hidden" id="stale">Connection lost, retrying...</div>
+<script src="/static/common.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+function tick() { $("clock").textContent = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); }
+
+function printerCard(p) {
+  const j = p.current_job, last = p.last_job;
+  let body = "";
+  if (p.state === "printing" || p.state === "paused" || p.state === "attention") {
+    body = `<div class="who">${PL.esc(j ? j.name : "")}</div><div class="what">${PL.esc(j ? j.title : "")}</div>
+      <div class="bar"><i style="width:${p.progress || 0}%"></i></div>
+      <div class="muted">${Math.round(p.progress || 0)}% · ${PL.dur(p.remaining_s)} left</div>`;
+  } else if (p.state === "needs_clear") {
+    body = `<div class="who">${last ? (last.status === "failed" ? "Failed: " : "Done: ") + PL.esc(last.name) : "Check the bed"}</div>
+      <div class="what wrapline">Take the print off, then tap "Bed cleared" on the touch screen</div>`;
+  } else if (p.state === "maintenance") {
+    body = `<div class="what">${PL.esc(p.maintenance_note || "Out of service")}</div>`;
+  } else if (p.state === "offline") {
+    body = `<div class="what">Not connected</div>`;
+  } else {
+    body = `<div class="what">Waiting for the next job</div>`;
+  }
+  return `<div class="pr ${p.state}"><h2><span>${PL.esc(p.name)}</span>${PL.badge(p.state)}</h2>${body}</div>`;
+}
+
+async function refresh() {
+  try {
+    const st = await PL.api("/api/state");
+    $("stale").classList.add("hidden");
+    $("lab").textContent = st.lab_name;
+    $("printers").innerHTML = st.printers.map(printerCard).join("") || `<p class="muted">No printers set up yet. Add them at /admin.</p>`;
+    const names = Object.fromEntries(st.printers.map(p => [p.id, p.name]));
+    // Turn a slicer model code (e.g. COREONEL) into the names of the printers that accept it.
+    const fits = j => {
+      if (j.target_printer_id) return names[j.target_printer_id] || "";
+      const ok = st.printers.filter(p => !p.models || p.models.toUpperCase().split(",").map(s => s.trim()).includes((j.printer_model || "").toUpperCase()));
+      if (!ok.length) return j.printer_model || "Any";
+      return ok.length > 2 ? `${ok[0].name} +${ok.length - 1}` : ok.map(p => p.name).join(" / ");
+    };
+    const q = st.queue.slice(0, 10);
+    $("queue").innerHTML = q.length ? `<table><tr><th></th><th>Student</th><th>File</th><th>Time</th><th>Printer</th><th>Starts</th></tr>` +
+      q.map((j, i) => `<tr><td class="num">${i + 1}</td><td>${PL.esc(j.name)}</td><td>${PL.esc(j.title)}</td><td>${j.est}</td>
+        <td>${PL.esc(fits(j))}</td>
+        <td>${j.est_start ? PL.time(j.est_start) : "—"}</td></tr>`).join("") + `</table>` +
+      (st.queue.length > 10 ? `<p class="muted">+ ${st.queue.length - 10} more</p>` : "")
+      : `<p class="muted" style="font-size:1.2rem">The queue is empty.</p>`;
+    $("pending").innerHTML = st.pending.length
+      ? `<div class="banner">${st.pending.length} print${st.pending.length > 1 ? "s" : ""} waiting for teacher approval</div>` : "";
+    $("failed").innerHTML = st.failed_today.slice(0, 6).map(j =>
+      `<li><b>${PL.esc(j.name)}</b> · ${PL.esc(j.title)}<br><span class="muted">${PL.esc(j.fail_reason)}</span></li>`).join("")
+      || `<li class="muted" style="list-style:none;margin-left:-1.2rem">None so far.</li>`;
+  } catch (e) {
+    $("stale").classList.remove("hidden");
+  }
+}
+tick(); refresh();
+setInterval(tick, 10000);
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

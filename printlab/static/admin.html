@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Print Lab · Admin</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .check { display: flex; gap: 8px; align-items: center; font-weight: 600; }
+  .check input { width: auto; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="top"><h1>Admin</h1>
+    <div class="small"><a href="/">Upload</a><a href="/teacher">Teachers</a><a href="/board">Board</a>
+      <a href="#" id="logout" class="hidden">Log out</a></div></nav>
+
+  <div class="card hidden" id="setupCard">
+    <h2>First-time setup</h2>
+    <p>Choose the admin password. You'll use it to add printers and teachers.</p>
+    <form id="setup" class="row"><div><label for="newpw">Admin password (8+ characters)</label><input id="newpw" type="password" minlength="8" required></div>
+      <div style="flex:0 0 auto"><button class="primary">Save</button></div></form>
+    <div class="msg" id="setupMsg"></div>
+  </div>
+
+  <div class="card hidden" id="loginCard">
+    <h2>Admin login</h2>
+    <form id="login" class="row"><div><label for="pw">Password</label><input id="pw" type="password" required></div>
+      <div style="flex:0 0 auto"><button class="primary">Log in</button></div></form>
+    <div class="msg" id="loginMsg"></div>
+  </div>
+
+  <div id="main" class="hidden">
+    <div class="card">
+      <h2>Printers</h2>
+      <div id="printers"></div>
+      <h3 style="margin-top:20px" id="pfTitle">Add a printer</h3>
+      <form id="pf">
+        <input type="hidden" name="id">
+        <div class="grid2">
+          <div><label>Name</label><input name="name" required placeholder="CORE One L #1"></div>
+          <div><label>Type</label><select name="kind">
+            <option value="prusalink">Prusa (PrusaLink)</option><option value="bambu">Bambu Lab (LAN)</option><option value="mock">Pretend printer (testing)</option></select></div>
+          <div><label>Accepted printer models</label><input name="models" list="modelHints" placeholder="COREONE">
+            <div class="small muted">Comma list, as the slicer writes it. Leave empty to accept any file of this type.</div></div>
+          <div><label class="kind-mock">Speed-up factor</label><label class="kind-prusalink kind-bambu">IP address</label>
+            <input name="host" placeholder="192.168.1.50"></div>
+          <div class="kind-prusalink"><label>PrusaLink API key</label><input name="api_key" autocomplete="off"></div>
+          <div class="kind-prusalink"><label>…or PrusaLink user</label><input name="username" placeholder="maker"></div>
+          <div class="kind-prusalink"><label>…and password</label><input name="password" type="password" autocomplete="off"></div>
+          <div class="kind-prusalink"><label>Storage</label><input name="storage" value="usb"></div>
+          <div class="kind-bambu"><label>Serial number</label><input name="serial"></div>
+          <div class="kind-bambu"><label>Access code</label><input name="access_code" autocomplete="off"></div>
+          <div class="kind-bambu"><label class="check"><input type="checkbox" name="use_ams" checked> Use AMS</label></div>
+          <div><label>Display order</label><input name="sort" type="number" value="0"></div>
+          <div><label class="check"><input type="checkbox" name="enabled" checked> Enabled</label>
+            <label class="check"><input type="checkbox" name="maintenance"> In maintenance</label></div>
+          <div><label>Maintenance note</label><input name="maintenance_note" placeholder="Nozzle swap"></div>
+        </div>
+        <div style="margin-top:12px" class="actions"><button class="primary">Save printer</button><button type="button" id="pfReset">New printer</button></div>
+        <div class="msg" id="pfMsg"></div>
+      </form>
+      <datalist id="modelHints"><option value="COREONE"><option value="COREONEL"><option value="MK4"><option value="MK4S"><option value="BL-P001"></datalist>
+    </div>
+
+    <div class="card">
+      <h2>Rules and settings</h2>
+      <form id="sf" class="grid2">
+        <div><label>Lab name</label><input name="lab_name"></div>
+        <div><label>Auto-approve prints up to (minutes)</label><input name="short_print_minutes" inputmode="numeric"></div>
+        <div><label>Auto-approve everything sent after (24 h time)</label><input name="auto_approve_after" placeholder="13:30"></div>
+        <div><label>Longest print allowed (hours)</label><input name="max_print_hours" inputmode="decimal"></div>
+        <div><label>Prints per student per day (0 = no limit)</label><input name="max_jobs_per_student_per_day" inputmode="numeric"></div>
+        <div><label>Class codes (comma list, empty = any)</label><input name="class_codes" placeholder="ENG1, ROBOTICS"></div>
+        <div><label>Max upload size (MB)</label><input name="max_upload_mb" inputmode="numeric"></div>
+        <div><label>New admin password (optional)</label><input name="new_admin_password" type="password" autocomplete="new-password"></div>
+        <div style="align-self:end"><button class="primary">Save settings</button></div>
+      </form>
+      <div class="msg" id="sfMsg"></div>
+    </div>
+
+    <div class="card">
+      <h2>Teachers</h2>
+      <div id="teachers"></div>
+      <form id="tf" class="row" style="margin-top:12px">
+        <div><label>Name</label><input name="name" required></div>
+        <div><label>PIN (4-8 digits)</label><input name="pin" inputmode="numeric" required autocomplete="off"></div>
+        <div style="flex:0 0 auto"><button class="primary">Add teacher</button></div>
+      </form>
+      <div class="msg" id="tfMsg"></div>
+    </div>
+
+    <div class="card"><h2>History</h2><a class="btn" href="/api/admin/export.csv">Download all jobs as CSV</a></div>
+  </div>
+</div>
+<script src="/static/common.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const pf = $("pf");
+
+async function check() {
+  const me = await PL.api("/api/me");
+  const isAdmin = me.role === "admin";
+  $("setupCard").classList.toggle("hidden", isAdmin || me.admin_set !== false);
+  $("loginCard").classList.toggle("hidden", isAdmin || me.admin_set === false);
+  $("main").classList.toggle("hidden", !isAdmin);
+  $("logout").classList.toggle("hidden", !isAdmin);
+  if (isAdmin) { loadPrinters(); loadSettings(); loadTeachers(); }
+}
+
+$("setup").addEventListener("submit", async e => {
+  e.preventDefault();
+  try {
+    await PL.api("/api/setup", { method: "POST", json: { password: $("newpw").value } });
+    await PL.api("/api/login", { method: "POST", json: { admin_password: $("newpw").value } });
+    check();
+  } catch (err) { PL.show($("setupMsg"), err.message, "err"); }
+});
+$("login").addEventListener("submit", async e => {
+  e.preventDefault();
+  try { await PL.api("/api/login", { method: "POST", json: { admin_password: $("pw").value } }); $("pw").value = ""; check(); }
+  catch (err) { PL.show($("loginMsg"), err.message, "err"); }
+});
+$("logout").addEventListener("click", async e => { e.preventDefault(); await PL.api("/api/logout", { method: "POST" }); check(); });
+
+// ---------------------------------------------------------------- printers
+let printers = [];
+function kindFields() {
+  const k = pf.kind.value;
+  pf.querySelectorAll(".kind-prusalink,.kind-bambu,.kind-mock").forEach(el => {
+    el.classList.toggle("hidden", !el.classList.contains("kind-" + k));
+  });
+}
+pf.kind.addEventListener("change", kindFields);
+
+async function loadPrinters() {
+  printers = await PL.api("/api/admin/printers");
+  $("printers").innerHTML = printers.length ? `<table><tr><th>Name</th><th>Type</th><th>Models</th><th>Address</th><th>Status</th><th></th></tr>` +
+    printers.map(p => `<tr><td><b>${PL.esc(p.name)}</b></td><td>${PL.esc(p.kind)}</td><td>${PL.esc(p.models)}</td><td>${PL.esc(p.host)}</td>
+      <td>${PL.badge(p.maintenance ? "maintenance" : p.live_state)}${p.last_error ? `<div class="small" style="color:var(--bad)">${PL.esc(p.last_error)}</div>` : ""}</td>
+      <td><div class="actions"><button data-edit="${p.id}">Edit</button><button data-del="${p.id}">Delete</button></div></td></tr>`).join("") + `</table>`
+    : `<p class="muted">No printers yet. Add one below.</p>`;
+}
+$("printers").addEventListener("click", async e => {
+  const ed = e.target.dataset.edit, del = e.target.dataset.del;
+  if (ed) {
+    const p = printers.find(x => x.id == ed);
+    for (const el of pf.elements) {
+      if (!el.name) continue;
+      if (el.type === "checkbox") el.checked = !!p[el.name];
+      else el.value = p[el.name] ?? "";
+    }
+    $("pfTitle").textContent = "Edit " + p.name;
+    kindFields();
+    pf.scrollIntoView({ behavior: "smooth" });
+  }
+  if (del && confirm("Delete this printer?")) {
+    try { await PL.api(`/api/admin/printers/${del}`, { method: "DELETE" }); loadPrinters(); } catch (err) { alert(err.message); }
+  }
+});
+$("pfReset").addEventListener("click", () => { pf.reset(); pf.id.value = ""; $("pfTitle").textContent = "Add a printer"; kindFields(); });
+pf.addEventListener("submit", async e => {
+  e.preventDefault();
+  const body = {};
+  for (const el of pf.elements) {
+    if (!el.name || el.name === "id") continue;
+    body[el.name] = el.type === "checkbox" ? (el.checked ? 1 : 0) : el.value;
+  }
+  try {
+    if (pf.id.value) await PL.api(`/api/admin/printers/${pf.id.value}`, { method: "PUT", json: body });
+    else await PL.api("/api/admin/printers", { method: "POST", json: body });
+    PL.show($("pfMsg"), "Saved. Status updates within a few seconds.", "ok");
+    $("pfReset").click();
+    setTimeout(loadPrinters, 300);
+    setTimeout(loadPrinters, 6000);
+  } catch (err) { PL.show($("pfMsg"), err.message, "err"); }
+});
+
+// ---------------------------------------------------------------- settings
+async function loadSettings() {
+  const s = await PL.api("/api/admin/settings");
+  for (const el of $("sf").elements) if (el.name && el.name in s) el.value = s[el.name];
+}
+$("sf").addEventListener("submit", async e => {
+  e.preventDefault();
+  const body = {};
+  for (const el of $("sf").elements) if (el.name) body[el.name] = el.value;
+  try { await PL.api("/api/admin/settings", { method: "PUT", json: body }); $("sf").new_admin_password.value = ""; PL.show($("sfMsg"), "Saved.", "ok"); }
+  catch (err) { PL.show($("sfMsg"), err.message, "err"); }
+});
+
+// ---------------------------------------------------------------- teachers
+async function loadTeachers() {
+  const t = await PL.api("/api/admin/teachers");
+  $("teachers").innerHTML = t.length ? `<table>` + t.map(x => `<tr><td>${PL.esc(x.name)}</td>
+    <td style="text-align:right"><button data-tdel="${x.id}">Remove</button></td></tr>`).join("") + `</table>`
+    : `<p class="muted">No teachers yet. Add at least one so long prints can be approved.</p>`;
+}
+$("teachers").addEventListener("click", async e => {
+  const id = e.target.dataset.tdel;
+  if (id && confirm("Remove this teacher?")) { await PL.api(`/api/admin/teachers/${id}`, { method: "DELETE" }); loadTeachers(); }
+});
+$("tf").addEventListener("submit", async e => {
+  e.preventDefault();
+  try {
+    await PL.api("/api/admin/teachers", { method: "POST", json: { name: $("tf").name.value, pin: $("tf").pin.value } });
+    $("tf").reset(); PL.show($("tfMsg"), "Teacher added.", "ok"); loadTeachers();
+  } catch (err) { PL.show($("tfMsg"), err.message, "err"); }
+});
+
+kindFields();
+check();
+</script>
+</body>
+</html>
